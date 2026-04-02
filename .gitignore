@@ -1,0 +1,57 @@
+# ========================
+# Xcode / iOS
+# ========================
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.moved-aside
+DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+.build/
+Pods/
+Carthage/Build/
+.swiftpm/
+
+# ========================
+# Swift Package Manager
+# ========================
+.build/
+*.resolved
+
+# ========================
+# Vapor / Server
+# ========================
+Server/.build/
+Server/*.resolved
+.env
+.env.local
+
+# ========================
+# macOS
+# ========================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ========================
+# Docker
+# ========================
+.docker/
+
+# ========================
+# IDE
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo

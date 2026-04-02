@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Ghostenger WebSocket Envelope",
+  "description": "All WebSocket messages are wrapped in this envelope. The server never sees plaintext payload content.",
+  "type": "object",
+  "required": ["type", "id"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "message.send",
+        "message.new",
+        "message.ack",
+        "presence.update",
+        "typing",
+        "ping",
+        "pong",
+        "error"
+      ]
+    },
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Client-generated message UUID for deduplication and acks"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Message-type-specific payload"
+    }
+  },
+  "definitions": {
+    "message.send": {
+      "description": "Client → Server: send an encrypted message",
+      "properties": {
+        "conversationId": { "type": "string", "format": "uuid" },
+        "ciphertext": {
+          "type": "string",
+          "description": "Base64-encoded Double Ratchet ciphertext. Server stores this opaquely."
+        },
+        "messageType": {
+          "type": "integer",
+          "enum": [0, 1],
+          "description": "0 = normal ratchet message, 1 = prekey message (first in session)"
+        }
+      }
+    },
+    "message.new": {
+      "description": "Server → Client: a new encrypted message arrived",
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "conversationId": { "type": "string", "format": "uuid" },
+        "senderId": { "type": "string", "format": "uuid" },
+        "ciphertext": { "type": "string" },
+        "messageType": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "message.ack": {
+      "description": "Client → Server: acknowledge delivery of a message",
+      "properties": {
+        "messageId": { "type": "string", "format": "uuid" }
+      }
+    },
+    "presence.update": {
+      "description": "Server → Client: a contact came online/offline",
+      "properties": {
+        "userId": { "type": "string", "format": "uuid" },
+        "status": { "type": "string", "enum": ["online", "offline"] },
+        "lastSeen": { "type": "string", "format": "date-time" }
+      }
+    },
+    "typing": {
+      "description": "Client → Server or Server → Client: typing indicator",
+      "properties": {
+        "conversationId": { "type": "string", "format": "uuid" },
+        "userId": { "type": "string", "format": "uuid" }
+      }
+    }
+  }
+}
