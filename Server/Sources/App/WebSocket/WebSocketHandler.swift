@@ -1,79 +1,146 @@
 import Vapor
 import Redis
 
-/// Handles a single authenticated WebSocket connection.
-/// Subscribes to the user's Redis pubsub channel and forwards incoming server events.
+/// Manages persistent WebSocket connections.
+/// Each authenticated client maintains one connection.
+/// Incoming Redis PubSub messages for the user are forwarded over the socket.
 actor WebSocketHandler {
+    // userID -> [WebSocket]
+    private var connections: [UUID: [WebSocket]] = [:]
+
     func handle(req: Request, ws: WebSocket) async {
-        guard let payload = try? req.authPayload,
-              let userId = try? payload.userId
-        else {
+        let user = try? req.auth.require(User.self)
+        guard let userID = user?.id else {
             try? await ws.close(code: .policyViolation)
             return
         }
 
-        let channelName = "ghost:pubsub:user:\(userId.uuidString)"
+        await registerConnection(ws, for: userID)
 
-        // Update presence
-        await updatePresence(userId: userId, online: true, redis: req.redis)
-
-        // Subscribe to Redis pubsub and forward messages to WebSocket
-        do {
-            try await req.redis.subscribe(
-                to: RedisChannelName(channelName),
-                messageReceiver: { _, message in
-                    guard case .bulkString(let bytes) = message,
-                          let text = bytes.flatMap({ String(bytes: $0, encoding: .utf8) })
-                    else { return }
-                    ws.send(text)
-                },
-                onSubscribe: nil,
-                onUnsubscribe: nil
-            )
-        } catch {
-            req.logger.error("WebSocket Redis subscribe failed: \(error)")
+        // Subscribe to this user's Redis channel
+        Task {
+            await subscribeToRedis(userID: userID, ws: ws, redis: req.application.redis)
         }
 
-        ws.onText { [weak self] _, text in
-            await self?.handleIncoming(text: text, userId: userId, req: req, ws: ws)
+        ws.onText { [weak self] ws, text in
+            await self?.handleIncoming(text: text, from: userID, ws: ws, req: req)
         }
 
         ws.onClose.whenComplete { [weak self] _ in
-            Task {
-                await self?.updatePresence(userId: userId, online: false, redis: req.redis)
-                try? await req.redis.unsubscribe(from: RedisChannelName(channelName))
-            }
+            Task { await self?.removeConnection(ws, for: userID) }
+        }
+
+        // Send connected ack
+        let ack = WSEnvelope(type: "connected", payload: ["userID": userID.uuidString])
+        if let data = try? JSONEncoder().encode(ack),
+           let json = String(data: data, encoding: .utf8) {
+            try? await ws.send(json)
         }
     }
 
-    private func handleIncoming(text: String, userId: UUID, req: Request, ws: WebSocket) async {
-        struct Envelope: Decodable {
-            let type: String
-            let id: String?
+    // MARK: - Connection registry
+
+    private func registerConnection(_ ws: WebSocket, for userID: UUID) {
+        connections[userID, default: []].append(ws)
+    }
+
+    private func removeConnection(_ ws: WebSocket, for userID: UUID) {
+        connections[userID]?.removeAll { $0 === ws }
+        if connections[userID]?.isEmpty == true {
+            connections.removeValue(forKey: userID)
         }
+    }
+
+    // MARK: - Redis subscription
+
+    private func subscribeToRedis(userID: UUID, ws: WebSocket, redis: Application.Redis) async {
+        let channel = RedisChannelName("ghost:pubsub:user:\(userID.uuidString)")
+        do {
+            try await redis.subscribe(to: [channel]) { _, message in
+                guard case .bulkString(let buffer) = message,
+                      let text = buffer.map({ String(buffer: $0) }) else { return }
+                Task {
+                    try? await ws.send(text)
+                }
+            }
+        } catch {
+            // Redis subscription failed — client will poll REST on reconnect
+        }
+    }
+
+    // MARK: - Incoming messages
+
+    private func handleIncoming(text: String, from userID: UUID, ws: WebSocket, req: Request) async {
         guard let data = text.data(using: .utf8),
-              let envelope = try? JSONDecoder().decode(Envelope.self, from: data)
-        else {
-            ws.send(#"{"type":"error","payload":{"message":"Invalid JSON"}}"#)
-            return
-        }
+              let envelope = try? JSONDecoder().decode(WSEnvelope.self, from: data)
+        else { return }
 
         switch envelope.type {
         case "ping":
-            ws.send(#"{"type":"pong"}"#)
-        case "presence.update":
-            await updatePresence(userId: userId, online: true, redis: req.redis)
+            let pong = WSEnvelope(type: "pong", payload: [:])
+            if let d = try? JSONEncoder().encode(pong),
+               let json = String(d, encoding: .utf8) {
+                try? await ws.send(json)
+            }
+
+        case "typing":
+            await broadcastTyping(from: userID, payload: envelope.payload, req: req)
+
+        case "message.ack":
+            // Client acknowledges receipt of a message
+            if let msgID = envelope.payload["messageID"].flatMap({ UUID(uuidString: $0) }) {
+                _ = try? await Message.find(msgID, on: req.db).map { msg in
+                    msg?.isDelivered = true
+                    try? msg?.save(on: req.db)
+                }
+            }
+
         default:
-            req.logger.debug("Unhandled WS message type: \(envelope.type)")
+            break
         }
     }
 
-    private func updatePresence(userId: UUID, online: Bool, redis: RedisClient) async {
-        let key = RedisKey("ghost:presence:\(userId.uuidString)")
-        let value = online ? "online" : "offline"
-        _ = try? await redis.set(key, to: value)
-        if online {
-            _ = try? await redis.expire(key, after: .init(.seconds(300)))
+    private func broadcastTyping(from userID: UUID, payload: [String: String], req: Request) async {
+        guard let convIDString = payload["conversationID"],
+              let convID = UUID(uuidString: convIDString)
+        else { return }
+
+        // Set typing indicator in Redis with 5s TTL
+        let key = RedisKey("ghost:typing:\(convID.uuidString):\(userID.uuidString)")
+        _ = try? await req.redis.set(key, to: "1")
+        _ = try? await req.redis.expire(key, after: .seconds(5))
+
+        // Broadcast typing event to other participants
+        let service = MessageFanoutService(redis: req.application.redis)
+        let typingEnvelope = TypingEnvelope(
+            type: "typing",
+            conversationID: convIDString,
+            userID: userID.uuidString
+        )
+        if let data = try? JSONEncoder().encode(typingEnvelope),
+           let json = String(data: data, encoding: .utf8) {
+            do {
+                let participants = try await ConversationParticipant.query(on: req.db)
+                    .filter(\.$conversation.$id == convID)
+                    .all()
+                for p in participants where p.$user.id != userID {
+                    let channel = RedisChannelName("ghost:pubsub:user:\(p.$user.id.uuidString)")
+                    _ = try? await req.redis.publish(json, to: channel)
+                }
+            } catch {}
         }
     }
+}
+
+// MARK: - Wire types
+
+struct WSEnvelope: Codable {
+    let type: String
+    let payload: [String: String]
+}
+
+struct TypingEnvelope: Codable {
+    let type: String
+    let conversationID: String
+    let userID: String
 }

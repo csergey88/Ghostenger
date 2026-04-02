@@ -1,24 +1,30 @@
-import SwiftUI
+import Foundation
 
-@Observable
-final class LoginViewModel {
-    var username = ""
-    var password = ""
-    var isLoading = false
-    var errorMessage: String?
+@MainActor
+final class LoginViewModel: ObservableObject {
+    @Published var username = ""
+    @Published var password = ""
+    @Published var isLoading = false
+    @Published var errorMessage: String?
 
     private let authService = AuthService()
 
-    @MainActor
-    func login() async {
+    func login(appState: AppState) async {
+        guard !username.isEmpty, !password.isEmpty else {
+            errorMessage = "Please enter username and password"
+            return
+        }
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
 
         do {
-            try await authService.login(username: username, password: password)
-        } catch {
+            let session = try await authService.login(username: username, password: password)
+            appState.signIn(session: session)
+        } catch let error as APIError {
             errorMessage = error.localizedDescription
+        } catch {
+            errorMessage = "Login failed. Please try again."
         }
     }
 }

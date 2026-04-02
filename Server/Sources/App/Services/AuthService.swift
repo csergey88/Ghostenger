@@ -1,5 +1,4 @@
 import Vapor
-import Fluent
 import JWT
 import Crypto
 
@@ -7,75 +6,123 @@ struct AuthService {
     let db: Database
     let jwt: Request.JWT
 
-    private static let tokenLifetime: TimeInterval = 30 * 24 * 60 * 60 // 30 days
+    // MARK: - Register
 
-    func register(_ dto: RegisterDTO) async throws -> TokenResponse {
-        guard dto.username.count >= 3, dto.username.count <= 32 else {
-            throw Abort(.badRequest, reason: "Username must be 3–32 characters")
-        }
-        guard dto.password.count >= 8 else {
-            throw Abort(.badRequest, reason: "Password must be at least 8 characters")
-        }
+    struct RegisterRequest: Content {
+        let username: String
+        let phoneHash: String
+        let password: String
+        let identityPublicKey: String
+        let displayName: String
+        let deviceID: String
+        let signedPrekey: String
+        let signedPrekeySignature: String
+        let oneTimePrekeys: [String]
+    }
 
-        let existing = try await User.query(on: db)
-            .filter(\.$username == dto.username)
+    struct AuthResponse: Content {
+        let token: String
+        let user: User.PublicProfile
+    }
+
+    func register(_ req: RegisterRequest) async throws -> AuthResponse {
+        // Check uniqueness
+        let existingUser = try await User.query(on: db)
+            .filter(\.$username == req.username)
             .first()
-        guard existing == nil else {
+        guard existingUser == nil else {
             throw Abort(.conflict, reason: "Username already taken")
         }
 
-        let hash = try Bcrypt.hash(dto.password)
-        let user = User(username: dto.username, passwordHash: hash, identityKeyPublic: dto.identityKeyPublic)
+        // Hash password with bcrypt
+        let passwordHash = try Bcrypt.hash(req.password)
+
+        let user = User(
+            username: req.username,
+            phoneHash: req.phoneHash,
+            passwordHash: passwordHash,
+            identityPublicKey: req.identityPublicKey,
+            displayName: req.displayName
+        )
         try await user.save(on: db)
 
-        let device = Device(userID: try user.requireID(), deviceName: "Primary")
+        guard let userID = user.id else { throw Abort(.internalServerError) }
+
+        // Register device
+        let device = Device(userID: userID, deviceID: req.deviceID, platform: "ios")
         try await device.save(on: db)
 
-        // Upload initial signed prekey
-        let sp = dto.signedPrekeyBundle
-        let signedKey = PrekeyBundle(
-            userID: try user.requireID(),
-            prekeyId: sp.prekeyId,
-            publicKey: sp.publicKey,
-            isSigned: true,
-            signature: sp.signature
+        // Upload initial prekey bundle
+        let bundle = PrekeyBundle(
+            userID: userID,
+            deviceID: req.deviceID,
+            signedPrekey: req.signedPrekey,
+            signedPrekeySignature: req.signedPrekeySignature,
+            oneTimePrekey: req.oneTimePrekeys.first
         )
-        try await signedKey.save(on: db)
+        try await bundle.save(on: db)
 
-        return try await issueToken(userId: user.requireID(), deviceId: device.requireID())
+        // Upload remaining OPKs
+        for opk in req.oneTimePrekeys.dropFirst() {
+            let opkBundle = PrekeyBundle(
+                userID: userID,
+                deviceID: req.deviceID,
+                signedPrekey: req.signedPrekey,
+                signedPrekeySignature: req.signedPrekeySignature,
+                oneTimePrekey: opk
+            )
+            try await opkBundle.save(on: db)
+        }
+
+        let token = try await issueToken(userID: userID, deviceID: req.deviceID)
+        return AuthResponse(token: token, user: user.publicProfile)
     }
 
-    func login(_ dto: LoginDTO) async throws -> TokenResponse {
+    // MARK: - Login
+
+    struct LoginRequest: Content {
+        let username: String
+        let password: String
+        let deviceID: String
+    }
+
+    func login(_ req: LoginRequest) async throws -> AuthResponse {
         guard let user = try await User.query(on: db)
-            .filter(\.$username == dto.username)
+            .filter(\.$username == req.username)
             .first()
         else {
             throw Abort(.unauthorized, reason: "Invalid credentials")
         }
 
-        guard try Bcrypt.verify(dto.password, created: user.passwordHash) else {
+        guard try Bcrypt.verify(req.password, created: user.passwordHash) else {
             throw Abort(.unauthorized, reason: "Invalid credentials")
         }
 
-        let device = Device(userID: try user.requireID(), deviceName: "Unknown")
-        try await device.save(on: db)
+        guard let userID = user.id else { throw Abort(.internalServerError) }
 
-        return try await issueToken(userId: user.requireID(), deviceId: device.requireID())
+        // Upsert device
+        if try await Device.query(on: db)
+            .filter(\.$user.$id == userID)
+            .filter(\.$deviceID == req.deviceID)
+            .first() == nil
+        {
+            let device = Device(userID: userID, deviceID: req.deviceID, platform: "ios")
+            try await device.save(on: db)
+        }
+
+        let token = try await issueToken(userID: userID, deviceID: req.deviceID)
+        return AuthResponse(token: token, user: user.publicProfile)
     }
 
-    private func issueToken(userId: UUID, deviceId: UUID) async throws -> TokenResponse {
-        let expiresAt = Date(timeIntervalSinceNow: Self.tokenLifetime)
-        let session = Session(userId: userId, deviceId: deviceId, expiresAt: expiresAt)
-        try await session.save(on: db)
+    // MARK: - Token
 
-        let payload = AuthPayload(
-            subject: .init(value: userId.uuidString),
-            deviceId: deviceId,
-            sessionId: try session.requireID(),
-            expiration: .init(value: expiresAt),
-            issuedAt: .init(value: Date())
+    private func issueToken(userID: UUID, deviceID: String) async throws -> String {
+        let payload = JWTPayload(
+            subject: .init(value: userID.uuidString),
+            expiration: .init(value: Date().addingTimeInterval(60 * 60 * 24 * 30)), // 30 days
+            userID: userID,
+            deviceID: deviceID
         )
-        let token = try await jwt.sign(payload)
-        return TokenResponse(token: token, expiresAt: expiresAt, userId: userId, deviceId: deviceId)
+        return try await jwt.sign(payload)
     }
 }

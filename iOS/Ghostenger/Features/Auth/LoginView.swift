@@ -1,62 +1,65 @@
 import SwiftUI
 
 struct LoginView: View {
-    @State private var viewModel = LoginViewModel()
+    var onRegister: () -> Void
+
+    @StateObject private var viewModel = LoginViewModel()
+    @EnvironmentObject var appState: AppState
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 24) {
-                Spacer()
+        VStack(spacing: 24) {
+            Spacer()
 
-                Text("Ghostenger")
-                    .font(.largeTitle.bold())
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 64))
+                .foregroundStyle(.teal)
 
-                Text("Secure, end-to-end encrypted messaging")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+            Text("Ghostenger")
+                .font(.largeTitle.bold())
 
-                Spacer()
+            Text("Secure end-to-end encrypted messaging")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
 
-                VStack(spacing: 16) {
-                    TextField("Username", text: $viewModel.username)
-                        .textFieldStyle(.roundedBorder)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+            Spacer()
 
-                    SecureField("Password", text: $viewModel.password)
-                        .textFieldStyle(.roundedBorder)
+            VStack(spacing: 12) {
+                TextField("Username", text: $viewModel.username)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
 
-                    if let error = viewModel.errorMessage {
-                        Text(error)
-                            .foregroundStyle(.red)
-                            .font(.caption)
-                    }
-
-                    Button {
-                        Task { await viewModel.login() }
-                    } label: {
-                        Group {
-                            if viewModel.isLoading {
-                                ProgressView()
-                            } else {
-                                Text("Sign In")
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(viewModel.isLoading || viewModel.username.isEmpty || viewModel.password.isEmpty)
-                }
-
-                NavigationLink("Create account") {
-                    RegisterView()
-                }
-                .padding(.top, 8)
-
-                Spacer()
+                SecureField("Password", text: $viewModel.password)
+                    .textFieldStyle(.roundedBorder)
             }
-            .padding(.horizontal, 32)
+            .padding(.horizontal)
+
+            if let error = viewModel.errorMessage {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .font(.caption)
+            }
+
+            Button {
+                Task { await viewModel.login(appState: appState) }
+            } label: {
+                if viewModel.isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Text("Sign In")
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .padding(.horizontal)
+            .disabled(viewModel.isLoading)
+
+            Button("Create account", action: onRegister)
+                .padding(.bottom)
         }
+        .padding()
     }
 }

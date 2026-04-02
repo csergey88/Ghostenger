@@ -1,7 +1,7 @@
 import Fluent
 import Vapor
 
-final class Device: Model, @unchecked Sendable {
+final class Device: Model, Content, @unchecked Sendable {
     static let schema = "devices"
 
     @ID(key: .id)
@@ -10,25 +10,30 @@ final class Device: Model, @unchecked Sendable {
     @Parent(key: "user_id")
     var user: User
 
-    @Field(key: "device_name")
-    var deviceName: String
+    /// Unique device identifier generated client-side
+    @Field(key: "device_id")
+    var deviceID: String
 
-    /// APNs push notification token (optional).
+    /// APNs push token (optional)
     @OptionalField(key: "push_token")
     var pushToken: String?
 
-    @Timestamp(key: "created_at", on: .create)
-    var createdAt: Date?
+    @Field(key: "platform")
+    var platform: String  // "ios"
 
     @Timestamp(key: "last_seen_at", on: .update)
     var lastSeenAt: Date?
 
+    @Timestamp(key: "created_at", on: .create)
+    var createdAt: Date?
+
     init() {}
 
-    init(id: UUID? = nil, userID: UUID, deviceName: String, pushToken: String? = nil) {
+    init(id: UUID? = nil, userID: UUID, deviceID: String, platform: String, pushToken: String? = nil) {
         self.id = id
         self.$user.id = userID
-        self.deviceName = deviceName
+        self.deviceID = deviceID
+        self.platform = platform
         self.pushToken = pushToken
     }
 }

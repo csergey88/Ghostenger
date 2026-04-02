@@ -1,13 +1,16 @@
 import SwiftUI
 
 struct RootView: View {
-    @Environment(AppState.self) private var appState
+    @EnvironmentObject var appState: AppState
 
     var body: some View {
-        if appState.isAuthenticated {
-            ChatListView()
-        } else {
-            LoginView()
+        Group {
+            if appState.isAuthenticated {
+                MainTabView()
+            } else {
+                AuthFlow()
+            }
         }
+        .animation(.easeInOut, value: appState.isAuthenticated)
     }
 }

@@ -7,18 +7,21 @@ func routes(_ app: Application) throws {
     // API v1
     let api = app.grouped("api", "v1")
 
-    // Auth — no JWT required
+    // Auth — public
     let authController = AuthController()
     try api.register(collection: authController)
 
     // Authenticated routes
     let protected = api.grouped(JWTAuthMiddleware())
 
+    let userController = UserController()
+    try protected.register(collection: userController)
+
+    let conversationController = ConversationController()
+    try protected.register(collection: conversationController)
+
     let messageController = MessageController()
     try protected.register(collection: messageController)
-
-    let contactController = ContactController()
-    try protected.register(collection: contactController)
 
     let prekeyController = PrekeyController()
     try protected.register(collection: prekeyController)

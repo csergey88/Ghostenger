@@ -1,91 +1,120 @@
 import Foundation
 
-enum APIError: Error {
-    case invalidResponse
-    case httpError(statusCode: Int, body: String)
-    case decodingError(Error)
-    case noAuthToken
-}
-
+/// Base HTTP client for all REST API calls.
 final class APIClient {
     static let shared = APIClient()
 
     #if DEBUG
-    private let baseURL = URL(string: "http://localhost:8080/api/v1")!
+    private let baseURL = URL(string: "https://localhost:8080/api/v1")!
     #else
     private let baseURL = URL(string: "https://api.ghostenger.app/api/v1")!
     #endif
 
-    private var authToken: String?
+    private let session: URLSession
 
-    private let session: URLSession = {
+    init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
-        return URLSession(configuration: config)
-    }()
-
-    private let decoder: JSONDecoder = {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return d
-    }()
-
-    private let encoder: JSONEncoder = {
-        let e = JSONEncoder()
-        e.dateEncodingStrategy = .iso8601
-        return e
-    }()
-
-    func setAuthToken(_ token: String?) {
-        authToken = token
+        config.timeoutIntervalForResource = 60
+        self.session = URLSession(configuration: config)
     }
 
-    func post<Body: Encodable, Response: Decodable>(
-        path: String,
-        body: Body,
-        authenticated: Bool = false
-    ) async throws -> Response {
-        let url = baseURL.appendingPathComponent(path)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(body)
+    // MARK: - Request builders
 
-        if authenticated {
-            guard let token = authToken else { throw APIError.noAuthToken }
+    func get<T: Decodable>(_ path: String, token: String? = nil, queryItems: [URLQueryItem]? = nil) async throws -> T {
+        let request = try buildRequest(method: "GET", path: path, token: token, queryItems: queryItems, body: nil as Empty?)
+        return try await perform(request)
+    }
+
+    func post<Body: Encodable, T: Decodable>(_ path: String, body: Body, token: String? = nil) async throws -> T {
+        let request = try buildRequest(method: "POST", path: path, token: token, body: body)
+        return try await perform(request)
+    }
+
+    func put<Body: Encodable>(_ path: String, body: Body, token: String) async throws {
+        let request = try buildRequest(method: "PUT", path: path, token: token, body: body)
+        let _: Empty = try await perform(request)
+    }
+
+    func patch<Body: Encodable, T: Decodable>(_ path: String, body: Body, token: String) async throws -> T {
+        let request = try buildRequest(method: "PATCH", path: path, token: token, body: body)
+        return try await perform(request)
+    }
+
+    // MARK: - Core
+
+    private func buildRequest<Body: Encodable>(
+        method: String,
+        path: String,
+        token: String? = nil,
+        queryItems: [URLQueryItem]? = nil,
+        body: Body?
+    ) throws -> URLRequest {
+        var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: true)!
+        components.queryItems = queryItems
+
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        return try await perform(request)
+        if let body, method != "GET" {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            request.httpBody = try encoder.encode(body)
+        }
+
+        return request
     }
 
-    func get<Response: Decodable>(path: String) async throws -> Response {
-        let url = baseURL.appendingPathComponent(path)
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-
-        guard let token = authToken else { throw APIError.noAuthToken }
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        return try await perform(request)
-    }
-
-    private func perform<Response: Decodable>(_ request: URLRequest) async throws -> Response {
+    private func perform<T: Decodable>(_ request: URLRequest) async throws -> T {
         let (data, response) = try await session.data(for: request)
 
         guard let http = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
 
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw APIError.httpError(statusCode: http.statusCode, body: body)
+        guard 200..<300 ~= http.statusCode else {
+            let apiError = try? JSONDecoder().decode(VaporError.self, from: data)
+            throw APIError.httpError(statusCode: http.statusCode, reason: apiError?.reason)
         }
 
-        do {
-            return try decoder.decode(Response.self, from: data)
-        } catch {
-            throw APIError.decodingError(error)
+        if T.self == Empty.self {
+            return Empty() as! T
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(T.self, from: data)
+    }
+}
+
+// MARK: - Supporting Types
+
+struct Empty: Codable {}
+
+struct VaporError: Codable {
+    let error: Bool
+    let reason: String
+}
+
+enum APIError: LocalizedError {
+    case invalidResponse
+    case httpError(statusCode: Int, reason: String?)
+    case decodingFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidResponse:
+            return "Invalid server response"
+        case .httpError(let code, let reason):
+            return reason ?? "Request failed with status \(code)"
+        case .decodingFailed:
+            return "Failed to parse server response"
         }
     }
 }

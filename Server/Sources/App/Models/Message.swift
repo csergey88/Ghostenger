@@ -1,8 +1,8 @@
 import Fluent
 import Vapor
 
-/// Server stores ONLY ciphertext — the plaintext is never accessible to the server.
-final class Message: Model, @unchecked Sendable {
+/// Stores only ciphertext — the server cannot decrypt message content.
+final class Message: Model, Content, @unchecked Sendable {
     static let schema = "messages"
 
     @ID(key: .id)
@@ -11,69 +11,78 @@ final class Message: Model, @unchecked Sendable {
     @Parent(key: "conversation_id")
     var conversation: Conversation
 
-    @Field(key: "sender_id")
-    var senderId: UUID
+    @Parent(key: "sender_id")
+    var sender: User
 
-    /// Base64-encoded Double Ratchet ciphertext.
+    /// Double Ratchet ciphertext (base64)
     @Field(key: "ciphertext")
     var ciphertext: String
 
-    /// Ratchet message type: 0 = normal, 1 = prekey message (first message in session).
+    /// Ratchet header containing the ratchet public key and message index (base64)
+    @Field(key: "ratchet_header")
+    var ratchetHeader: String
+
+    /// Recipient device IDs this message was encrypted for
+    @Field(key: "recipient_device_ids")
+    var recipientDeviceIDs: [String]
+
     @Field(key: "message_type")
-    var messageType: Int
+    var messageType: String  // "text", "image", "file", "key_exchange"
 
-    @Field(key: "delivered")
-    var delivered: Bool
+    @Field(key: "is_delivered")
+    var isDelivered: Bool
 
-    @Timestamp(key: "created_at", on: .create)
-    var createdAt: Date?
+    @Field(key: "is_read")
+    var isRead: Bool
+
+    @Timestamp(key: "sent_at", on: .create)
+    var sentAt: Date?
 
     init() {}
 
     init(
         id: UUID? = nil,
         conversationID: UUID,
-        senderId: UUID,
+        senderID: UUID,
         ciphertext: String,
-        messageType: Int = 0
+        ratchetHeader: String,
+        recipientDeviceIDs: [String],
+        messageType: String = "text"
     ) {
         self.id = id
         self.$conversation.id = conversationID
-        self.senderId = senderId
+        self.$sender.id = senderID
         self.ciphertext = ciphertext
+        self.ratchetHeader = ratchetHeader
+        self.recipientDeviceIDs = recipientDeviceIDs
         self.messageType = messageType
-        self.delivered = false
+        self.isDelivered = false
+        self.isRead = false
     }
 }
 
-// MARK: - DTOs
-
-struct SendMessageDTO: Content {
-    let conversationId: UUID
-    let ciphertext: String
-    let messageType: Int
-}
-
-struct MessageResponse: Content {
-    let id: UUID
-    let conversationId: UUID
-    let senderId: UUID
-    let ciphertext: String
-    let messageType: Int
-    let delivered: Bool
-    let createdAt: Date?
-}
+// MARK: - DTO
 
 extension Message {
-    func toResponse() throws -> MessageResponse {
-        MessageResponse(
-            id: try requireID(),
-            conversationId: $conversation.id,
-            senderId: senderId,
+    struct Envelope: Content {
+        let id: UUID
+        let conversationID: UUID
+        let senderID: UUID
+        let ciphertext: String
+        let ratchetHeader: String
+        let messageType: String
+        let sentAt: Date
+    }
+
+    var envelope: Envelope {
+        .init(
+            id: id!,
+            conversationID: $conversation.id,
+            senderID: $sender.id,
             ciphertext: ciphertext,
+            ratchetHeader: ratchetHeader,
             messageType: messageType,
-            delivered: delivered,
-            createdAt: createdAt
+            sentAt: sentAt ?? Date()
         )
     }
 }

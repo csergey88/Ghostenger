@@ -1,7 +1,7 @@
 import Fluent
 import Vapor
 
-final class User: Model, @unchecked Sendable {
+final class User: Model, Content, @unchecked Sendable {
     static let schema = "users"
 
     @ID(key: .id)
@@ -10,13 +10,21 @@ final class User: Model, @unchecked Sendable {
     @Field(key: "username")
     var username: String
 
+    @Field(key: "phone_hash")
+    var phoneHash: String
+
     @Field(key: "password_hash")
     var passwordHash: String
 
-    /// Public Ed25519 identity key (Base64-encoded).
-    /// The private key NEVER leaves the client device.
-    @Field(key: "identity_key_public")
-    var identityKeyPublic: String
+    /// Base64-encoded Ed25519 public identity key
+    @Field(key: "identity_public_key")
+    var identityPublicKey: String
+
+    @Field(key: "display_name")
+    var displayName: String
+
+    @OptionalField(key: "avatar_url")
+    var avatarURL: String?
 
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
@@ -35,48 +43,38 @@ final class User: Model, @unchecked Sendable {
     init(
         id: UUID? = nil,
         username: String,
+        phoneHash: String,
         passwordHash: String,
-        identityKeyPublic: String
+        identityPublicKey: String,
+        displayName: String
     ) {
         self.id = id
         self.username = username
+        self.phoneHash = phoneHash
         self.passwordHash = passwordHash
-        self.identityKeyPublic = identityKeyPublic
+        self.identityPublicKey = identityPublicKey
+        self.displayName = displayName
     }
 }
 
-extension User: Authenticatable {}
-
-// MARK: - DTOs
-
-struct RegisterDTO: Content {
-    let username: String
-    let password: String
-    /// Public identity key (Base64 DER/raw Ed25519)
-    let identityKeyPublic: String
-    /// Initial signed prekey bundle to upload during registration
-    let signedPrekeyBundle: SignedPrekeyBundleDTO
-}
-
-struct LoginDTO: Content {
-    let username: String
-    let password: String
-}
-
-struct UserPublicResponse: Content {
-    let id: UUID
-    let username: String
-    let identityKeyPublic: String
-    let createdAt: Date?
-}
+// MARK: - DTO
 
 extension User {
-    func toPublicResponse() throws -> UserPublicResponse {
-        UserPublicResponse(
-            id: try requireID(),
+    struct PublicProfile: Content {
+        let id: UUID
+        let username: String
+        let displayName: String
+        let identityPublicKey: String
+        let avatarURL: String?
+    }
+
+    var publicProfile: PublicProfile {
+        .init(
+            id: id!,
             username: username,
-            identityKeyPublic: identityKeyPublic,
-            createdAt: createdAt
+            displayName: displayName,
+            identityPublicKey: identityPublicKey,
+            avatarURL: avatarURL
         )
     }
 }

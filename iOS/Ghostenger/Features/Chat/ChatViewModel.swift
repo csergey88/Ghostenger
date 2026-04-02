@@ -1,78 +1,70 @@
-import SwiftUI
+import Foundation
+import Combine
 
-struct MessageItem: Identifiable {
-    let id: String
-    let senderId: String
-    let ciphertext: String
-    let isOutgoing: Bool
-    let createdAt: Date?
+@MainActor
+final class ChatViewModel: ObservableObject {
+    @Published var messages: [DecryptedMessage] = []
+    @Published var isLoading = false
+    @Published var isTyping = false
+
+    private let conversation: ConversationSummary
+    private let chatService = ChatService()
+    private let cryptoService = CryptoService()
+    private var typingTask: Task<Void, Never>?
+
+    init(conversation: ConversationSummary) {
+        self.conversation = conversation
+    }
+
+    func load(session: UserSession?) async {
+        guard let session else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let envelopes = try await chatService.fetchMessages(
+                conversationID: conversation.id,
+                token: session.token
+            )
+            messages = envelopes.compactMap { envelope in
+                try? cryptoService.decrypt(envelope: envelope, sessionOwnerID: session.userID)
+            }
+        } catch {
+            // Errors surface via UI state in future iteration
+        }
+    }
+
+    func sendMessage(text: String, session: UserSession?) async {
+        guard let session else { return }
+        do {
+            let envelope = try cryptoService.encrypt(
+                plaintext: text,
+                conversationID: conversation.id,
+                senderID: session.userID
+            )
+            let sent = try await chatService.sendMessage(envelope: envelope, token: session.token)
+            let decrypted = DecryptedMessage(
+                id: sent.id,
+                senderID: sent.senderID,
+                plaintext: text,
+                sentAt: sent.sentAt
+            )
+            messages.append(decrypted)
+        } catch {
+            // Surface error to user in future iteration
+        }
+    }
+
+    func sendTypingIndicator(session: UserSession?) {
+        typingTask?.cancel()
+        typingTask = Task {
+            chatService.sendTypingIndicator(conversationID: conversation.id)
+        }
+    }
 }
 
-@Observable
-final class ChatViewModel {
-    let conversationId: String
-    var messages: [MessageItem] = []
-    var draftText = ""
-    var errorMessage: String?
-
-    private let api = APIClient.shared
-
-    init(conversationId: String) {
-        self.conversationId = conversationId
-    }
-
-    func load() async {
-        do {
-            struct MessageResponse: Decodable {
-                let id: String
-                let senderId: String
-                let ciphertext: String
-                let createdAt: Date?
-            }
-            let list: [MessageResponse] = try await api.get(path: "messages/\(conversationId)")
-            await MainActor.run {
-                messages = list.map {
-                    MessageItem(
-                        id: $0.id,
-                        senderId: $0.senderId,
-                        ciphertext: $0.ciphertext,
-                        isOutgoing: false, // TODO: compare with current user ID
-                        createdAt: $0.createdAt
-                    )
-                }
-            }
-        } catch {
-            await MainActor.run { errorMessage = error.localizedDescription }
-        }
-    }
-
-    func send() async {
-        let text = draftText.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return }
-
-        // TODO: encrypt with Double Ratchet before sending
-        // For now, send a placeholder to validate the flow
-        let ciphertext = Data(text.utf8).base64EncodedString()
-
-        struct SendDTO: Encodable {
-            let conversationId: String
-            let ciphertext: String
-            let messageType: Int
-        }
-
-        do {
-            let dto = SendDTO(conversationId: conversationId, ciphertext: ciphertext, messageType: 0)
-            let _: MessageItem = try await {
-                struct MessageResponse: Decodable {
-                    let id: String; let senderId: String; let ciphertext: String; let createdAt: Date?
-                }
-                let resp: MessageResponse = try await api.post(path: "messages", body: dto, authenticated: true)
-                return MessageItem(id: resp.id, senderId: resp.senderId, ciphertext: resp.ciphertext, isOutgoing: true, createdAt: resp.createdAt)
-            }()
-            await MainActor.run { draftText = "" }
-            await load()
-        } catch {
-            await MainActor.run { errorMessage = error.localizedDescription }
-        }
-    }
+struct DecryptedMessage: Identifiable {
+    let id: UUID
+    let senderID: UUID
+    let plaintext: String
+    let sentAt: Date
 }
