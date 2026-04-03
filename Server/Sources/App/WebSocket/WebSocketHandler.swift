@@ -56,13 +56,18 @@ actor WebSocketHandler {
     private func subscribeToRedis(userID: UUID, ws: WebSocket, redis: Application.Redis) async {
         let channel = RedisChannelName("ghost:pubsub:user:\(userID.uuidString)")
         do {
-            try await redis.subscribe(to: [channel]) { _, message in
-                guard case .bulkString(let buffer) = message,
-                      let text = buffer.map({ String(buffer: $0) }) else { return }
-                Task {
-                    try? await ws.send(text)
-                }
-            }
+            try await redis.subscribe(
+                to: [channel],
+                messageReceiver: { _, message in
+                    guard case .bulkString(let buffer) = message,
+                          let text = buffer.map({ String(buffer: $0) }) else { return }
+                    Task {
+                        try? await ws.send(text)
+                    }
+                },
+                onSubscribe: nil,
+                onUnsubscribe: nil
+            )
         } catch {
             // Redis subscription failed — client will poll REST on reconnect
         }
@@ -87,12 +92,11 @@ actor WebSocketHandler {
             await broadcastTyping(from: userID, payload: envelope.payload, req: req)
 
         case "message.ack":
-            // Client acknowledges receipt of a message
-            if let msgID = envelope.payload["messageID"].flatMap({ UUID(uuidString: $0) }) {
-                _ = try? await Message.find(msgID, on: req.db).map { msg in
-                    msg?.isDelivered = true
-                    try? msg?.save(on: req.db)
-                }
+            if let msgIDString = envelope.payload["messageID"],
+               let msgID = UUID(uuidString: msgIDString),
+               let message = try? await Message.find(msgID, on: req.db) {
+                message.isDelivered = true
+                try? await message.save(on: req.db)
             }
 
         default:
@@ -111,24 +115,24 @@ actor WebSocketHandler {
         _ = try? await req.redis.expire(key, after: .seconds(5))
 
         // Broadcast typing event to other participants
-        let service = MessageFanoutService(redis: req.application.redis)
         let typingEnvelope = TypingEnvelope(
             type: "typing",
             conversationID: convIDString,
             userID: userID.uuidString
         )
-        if let data = try? JSONEncoder().encode(typingEnvelope),
-           let json = String(data: data, encoding: .utf8) {
-            do {
-                let participants = try await ConversationParticipant.query(on: req.db)
-                    .filter(\.$conversation.$id == convID)
-                    .all()
-                for p in participants where p.$user.id != userID {
-                    let channel = RedisChannelName("ghost:pubsub:user:\(p.$user.id.uuidString)")
-                    _ = try? await req.redis.publish(json, to: channel)
-                }
-            } catch {}
-        }
+        guard let data = try? JSONEncoder().encode(typingEnvelope),
+              let json = String(data: data, encoding: .utf8)
+        else { return }
+
+        do {
+            let participants = try await ConversationParticipant.query(on: req.db)
+                .filter(\.$conversation.$id == convID)
+                .all()
+            for p in participants where p.$user.id != userID {
+                let channel = RedisChannelName("ghost:pubsub:user:\(p.$user.id.uuidString)")
+                _ = try? await req.redis.publish(RESPValue(from: json), to: channel)
+            }
+        } catch {}
     }
 }
 

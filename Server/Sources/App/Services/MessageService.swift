@@ -6,62 +6,66 @@ struct MessageService {
     let db: Database
     let redis: RedisClient
 
-    func send(_ dto: SendMessageDTO, from senderId: UUID) async throws -> MessageResponse {
+    // MARK: - DTOs
+
+    struct SendMessageDTO: Content {
+        let conversationID: UUID
+        let ciphertext: String
+        let ratchetHeader: String
+        let recipientDeviceIDs: [String]
+        let messageType: String?
+    }
+
+    // MARK: - Send
+
+    func send(_ dto: SendMessageDTO, from senderID: UUID) async throws -> Message.Envelope {
         // Verify sender is a participant
-        guard let conversation = try await Conversation.find(dto.conversationId, on: db) else {
-            throw Abort(.notFound, reason: "Conversation not found")
-        }
-        guard conversation.containsUser(senderId) else {
+        guard try await ConversationParticipant.query(on: db)
+            .filter(\.$conversation.$id == dto.conversationID)
+            .filter(\.$user.$id == senderID)
+            .first() != nil
+        else {
             throw Abort(.forbidden, reason: "You are not a participant in this conversation")
         }
 
         let message = Message(
-            conversationID: dto.conversationId,
-            senderId: senderId,
+            conversationID: dto.conversationID,
+            senderID: senderID,
             ciphertext: dto.ciphertext,
-            messageType: dto.messageType
+            ratchetHeader: dto.ratchetHeader,
+            recipientDeviceIDs: dto.recipientDeviceIDs,
+            messageType: dto.messageType ?? "text"
         )
         try await message.save(on: db)
 
-        // Fan out to recipient(s) via Redis pubsub
-        let response = try message.toResponse()
-        try await fanout(message: response, in: conversation, from: senderId)
+        // Fan out to recipients via Redis pubsub
+        let fanout = MessageFanoutService(redis: redis)
+        await fanout.fanout(message: message.envelope, to: dto.conversationID, on: db)
 
-        return response
+        return message.envelope
     }
 
-    func list(conversationId: UUID, requestingUserId: UUID) async throws -> [MessageResponse] {
-        guard let conversation = try await Conversation.find(conversationId, on: db) else {
-            throw Abort(.notFound, reason: "Conversation not found")
-        }
-        guard conversation.containsUser(requestingUserId) else {
+    // MARK: - List
+
+    func list(conversationID: UUID, requestingUserID: UUID, before: Date? = nil, limit: Int = 50) async throws -> [Message.Envelope] {
+        guard try await ConversationParticipant.query(on: db)
+            .filter(\.$conversation.$id == conversationID)
+            .filter(\.$user.$id == requestingUserID)
+            .first() != nil
+        else {
             throw Abort(.forbidden)
         }
 
-        let messages = try await Message.query(on: db)
-            .filter(\.$conversation.$id == conversationId)
-            .sort(\.$createdAt, .ascending)
-            .all()
+        var query = Message.query(on: db)
+            .filter(\.$conversation.$id == conversationID)
+            .sort(\.$sentAt, .descending)
+            .limit(min(limit, 100))
 
-        return try messages.map { try $0.toResponse() }
-    }
-
-    private func fanout(message: MessageResponse, in conversation: Conversation, from senderId: UUID) async throws {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(message)
-        let json = String(data: data, encoding: .utf8) ?? "{}"
-
-        let envelope = #"{"type":"message.new","payload":\#(json)}"#
-
-        let recipientIds = conversation.participantIds
-            .split(separator: ",")
-            .compactMap { UUID(uuidString: String($0)) }
-            .filter { $0 != senderId }
-
-        for recipientId in recipientIds {
-            let channel = RedisChannelName("ghost:pubsub:user:\(recipientId.uuidString)")
-            _ = try await redis.publish(envelope, to: channel)
+        if let before {
+            query = query.filter(\.$sentAt < before)
         }
+
+        let messages = try await query.all()
+        return messages.map(\.envelope)
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// iOS-side auth service — communicates with the Vapor backend.
 final class AuthService {
@@ -71,7 +72,6 @@ final class AuthService {
     }
 
     private func sha256Hash(_ input: String) -> String {
-        import CryptoKit
         let digest = SHA256.hash(data: Data(input.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }

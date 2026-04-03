@@ -11,8 +11,11 @@ public func configure(_ app: Application) async throws {
     try app.databases.use(.postgres(url: dbURL), as: .psql)
 
     // MARK: - Redis
-    let redisURL = try RedisURL(string: Environment.get("REDIS_URL") ?? "redis://localhost:6379")
-    app.redis.configuration = try RedisConfiguration(serverAddresses: [redisURL.socketAddress])
+    let redisURLString = Environment.get("REDIS_URL") ?? "redis://localhost:6379"
+    guard let redisURL = URL(string: redisURLString) else {
+        throw Abort(.internalServerError, reason: "Invalid REDIS_URL")
+    }
+    app.redis.configuration = try RedisConfiguration(url: redisURL)
 
     // MARK: - JWT
     let jwtSecret = Environment.get("JWT_SECRET") ?? "ghostenger-dev-secret-change-in-production"
